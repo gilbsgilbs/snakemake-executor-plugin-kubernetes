@@ -51,6 +51,25 @@ def unparse_persistent_volumes(args: List[PersistentVolume]) -> List[str]:
     return [arg.unparse() for arg in args]
 
 
+def parse_bool(arg: str) -> bool:
+    # Snakemake CLI parser for booleans is bugged.
+    #   - booleans that default to "True" don't get namespaced with the plugin
+    #     name like other options, which produces a crash. (e.g.
+    #     `--kubernetes-no-foo` becomes `--no-foo` and therefore never makes it
+    #     to this plugin).
+    #   - optional boolean values are ignored, and only the presence or absence
+    #     of the option is taken into account. (e.g. `--kubernetes-privileged
+    #     true` is the same as `--kubernetes-privileged false` and will set the
+    #     privileged flag). This only way to not enable the privileged flag is
+    #     to not pass it to snakemake. Bruh.
+    # Therefore, we implement this custom parser that just works.
+    return arg in ["1", "true"]
+
+
+def unparse_bool(arg: bool) -> str:
+    return bool(arg).lower()
+
+
 @dataclass
 class ExecutorSettings(ExecutorSettingsBase):
     namespace: str = field(
@@ -83,7 +102,11 @@ class ExecutorSettings(ExecutorSettingsBase):
     )
     privileged: Optional[bool] = field(
         default=False,
-        metadata={"help": "Create privileged containers for jobs."},
+        metadata={
+            "help": "Create privileged containers for jobs.",
+            "parse_func": parse_bool,
+            "unparse_func": unparse_bool,
+        },
     )
     persistent_volumes: List[PersistentVolume] = field(
         default_factory=list,
@@ -101,6 +124,18 @@ class ExecutorSettings(ExecutorSettingsBase):
             "help": "Do not delete jobs after they have finished or failed. "
             "This is useful for debugging, or if your k8s cluster performs "
             "automatic cleanups."
+        },
+    )
+    nvidia_runtime_class_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Runtime class name to use for NVIDIA jobs."},
+    )
+    gpu_overcommit: Optional[bool] = field(
+        default=True,
+        metadata={
+            "help": "Allow GPU overcommitment.",
+            "parse_func": parse_bool,
+            "unparse_func": unparse_bool,
         },
     )
 
@@ -152,6 +187,10 @@ class Executor(RemoteExecutor):
         self.container_image = self.workflow.remote_execution_settings.container_image
         self.privileged = self.workflow.executor_settings.privileged
         self.persistent_volumes = self.workflow.executor_settings.persistent_volumes
+        self.nvidia_runtime_class_name = (
+            self.workflow.executor_settings.nvidia_runtime_class_name
+        )
+        self.gpu_overcommit = self.workflow.executor_settings.gpu_overcommit
 
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
 
@@ -260,29 +299,6 @@ class Executor(RemoteExecutor):
                     "Must be 'nvidia' or 'amd'."
                 )
 
-        # capabilities
-        if (
-            job.is_containerized
-            and DeploymentMethod.APPTAINER
-            in self.workflow.deployment_settings.deployment_method
-        ):
-            # TODO this should work, but it doesn't currently because of
-            # missing loop devices
-            # singularity inside docker requires SYS_ADMIN capabilities
-            # see
-            # https://groups.google.com/a/lbl.gov/forum/#!topic/singularity/e9mlDuzKowc
-            # container.capabilities = kubernetes.client.V1Capabilities()
-            # container.capabilities.add = ["SYS_ADMIN",
-            #                               "DAC_OVERRIDE",
-            #                               "SETUID",
-            #                               "SETGID",
-            #                               "SYS_CHROOT"]
-
-            # Running in priviledged mode always works
-            container.security_context = kubernetes.client.V1SecurityContext(
-                privileged=True
-            )
-
         # Add service account name if provided
         if self.k8s_service_account_name:
             pod_spec.service_account_name = self.k8s_service_account_name
@@ -321,9 +337,8 @@ class Executor(RemoteExecutor):
 
         scale_value = resources_dict.get("scale", 1)
 
-        # Only create container.resources.limits if scale is False
-        if not scale_value:
-            container.resources.limits = {}
+        container.resources.limits = {}
+
         # CPU and memory requests
         cores = resources_dict.get("_cores", 1)
         container.resources.requests["cpu"] = "{}m".format(
@@ -353,24 +368,29 @@ class Executor(RemoteExecutor):
             # for both if the cluster doesn't differentiate.
             # If your AMD plugin uses a different name, update accordingly:
             manufacturer = resources_dict.get("gpu_manufacturer", "").lower()
-            if manufacturer == "nvidia":
-                container.resources.requests["nvidia.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["nvidia.com/gpu"] = gpu_count
-                self.logger.debug(f"Requested NVIDIA GPU resources: {gpu_count}")
-            elif manufacturer == "amd":
-                container.resources.requests["amd.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["amd.com/gpu"] = gpu_count
-                self.logger.debug(f"Requested AMD GPU resources: {gpu_count}")
-            else:
-                # fallback if we never see a recognized manufacturer
-                # (the code above raises an error first, so we might never get here)
-                container.resources.requests["nvidia.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["nvidia.com/gpu"] = gpu_count
+            identifier = {
+                "nvidia": "nvidia.com/gpu",
+                "amd": "amd.com/gpu",
+            }.get(manufacturer, "nvidia.com/gpu")
+            container.resources.requests[identifier] = gpu_count
+            if not scale_value or not self.gpu_overcommit:
+                container.resources.limits[identifier] = gpu_count
+            if identifier == "nvidia.com/gpu":
+                if self.nvidia_runtime_class_name is not None:
+                    pod_spec.runtime_class_name = self.nvidia_runtime_class_name
+                if (
+                    DeploymentMethod.APPTAINER
+                    in self.workflow.deployment_settings.deployment_method
+                ):
+                    envvar = kubernetes.client.V1EnvVar(name="APPTAINER_NV")
+                    envvar.value = "true"
+                    container.env.append(envvar)
+
         # Privileged mode
-        if self.privileged:
+        if self.privileged or (
+            DeploymentMethod.APPTAINER
+            in self.workflow.deployment_settings.deployment_method
+        ):
             container.security_context = kubernetes.client.V1SecurityContext(
                 privileged=True
             )
