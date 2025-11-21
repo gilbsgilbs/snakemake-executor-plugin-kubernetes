@@ -51,6 +51,25 @@ def unparse_persistent_volumes(args: List[PersistentVolume]) -> List[str]:
     return [arg.unparse() for arg in args]
 
 
+def parse_bool(arg: str) -> bool:
+    # Snakemake CLI parser for booleans is bugged.
+    #   - booleans that default to "True" don't get namespaced with the plugin
+    #     name like other options, which produces a crash. (e.g.
+    #     `--kubernetes-no-foo` becomes `--no-foo` and therefore never makes it
+    #     to this plugin).
+    #   - optional boolean values are ignored, and only the presence or absence
+    #     of the option is taken into account. (e.g. `--kubernetes-privileged
+    #     true` is the same as `--kubernetes-privileged false` and will set the
+    #     privileged flag). This only way to not enable the privileged flag is
+    #     to not pass it to snakemake. Bruh.
+    # Therefore, we implement this custom parser that just works.
+    return arg in ["1", "true"]
+
+
+def unparse_bool(arg: bool) -> str:
+    return bool(arg).lower()
+
+
 @dataclass
 class ExecutorSettings(ExecutorSettingsBase):
     namespace: str = field(
@@ -83,7 +102,11 @@ class ExecutorSettings(ExecutorSettingsBase):
     )
     privileged: Optional[bool] = field(
         default=False,
-        metadata={"help": "Create privileged containers for jobs."},
+        metadata={
+            "help": "Create privileged containers for jobs.",
+            "parse_func": parse_bool,
+            "unparse_func": unparse_bool,
+        },
     )
     persistent_volumes: List[PersistentVolume] = field(
         default_factory=list,
