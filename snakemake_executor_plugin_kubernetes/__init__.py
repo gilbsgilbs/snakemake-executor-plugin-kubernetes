@@ -130,6 +130,14 @@ class ExecutorSettings(ExecutorSettingsBase):
         default=None,
         metadata={"help": "Runtime class name to use for NVIDIA jobs."},
     )
+    gpu_overcommit: Optional[bool] = field(
+        default=True,
+        metadata={
+            "help": "Allow GPU overcommitment.",
+            "parse_func": parse_bool,
+            "unparse_func": unparse_bool,
+        },
+    )
 
 
 # Required:
@@ -182,6 +190,7 @@ class Executor(RemoteExecutor):
         self.nvidia_runtime_class_name = (
             self.workflow.executor_settings.nvidia_runtime_class_name
         )
+        self.gpu_overcommit = self.workflow.executor_settings.gpu_overcommit
 
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
 
@@ -328,9 +337,8 @@ class Executor(RemoteExecutor):
 
         scale_value = resources_dict.get("scale", 1)
 
-        # Only create container.resources.limits if scale is False
-        if not scale_value:
-            container.resources.limits = {}
+        container.resources.limits = {}
+
         # CPU and memory requests
         cores = resources_dict.get("_cores", 1)
         container.resources.requests["cpu"] = "{}m".format(
@@ -365,7 +373,7 @@ class Executor(RemoteExecutor):
                 "amd": "amd.com/gpu",
             }.get(manufacturer, "nvidia.com/gpu")
             container.resources.requests[identifier] = gpu_count
-            if not scale_value:
+            if not scale_value or not self.gpu_overcommit:
                 container.resources.limits[identifier] = gpu_count
             if identifier == "nvidia.com/gpu":
                 if self.nvidia_runtime_class_name is not None:
