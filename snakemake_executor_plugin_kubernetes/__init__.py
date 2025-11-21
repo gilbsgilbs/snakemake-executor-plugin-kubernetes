@@ -126,6 +126,10 @@ class ExecutorSettings(ExecutorSettingsBase):
             "automatic cleanups."
         },
     )
+    nvidia_runtime_class_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Runtime class name to use for NVIDIA jobs."},
+    )
 
 
 # Required:
@@ -175,6 +179,9 @@ class Executor(RemoteExecutor):
         self.container_image = self.workflow.remote_execution_settings.container_image
         self.privileged = self.workflow.executor_settings.privileged
         self.persistent_volumes = self.workflow.executor_settings.persistent_volumes
+        self.nvidia_runtime_class_name = (
+            self.workflow.executor_settings.nvidia_runtime_class_name
+        )
 
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
 
@@ -360,6 +367,9 @@ class Executor(RemoteExecutor):
             container.resources.requests[identifier] = gpu_count
             if not scale_value:
                 container.resources.limits[identifier] = gpu_count
+            if identifier == "nvidia.com/gpu":
+                if self.nvidia_runtime_class_name is not None:
+                    pod_spec.runtime_class_name = self.nvidia_runtime_class_name
 
         # Privileged mode
         if self.privileged or (
