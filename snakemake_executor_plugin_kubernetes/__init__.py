@@ -353,22 +353,14 @@ class Executor(RemoteExecutor):
             # for both if the cluster doesn't differentiate.
             # If your AMD plugin uses a different name, update accordingly:
             manufacturer = resources_dict.get("gpu_manufacturer", "").lower()
-            if manufacturer == "nvidia":
-                container.resources.requests["nvidia.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["nvidia.com/gpu"] = gpu_count
-                self.logger.debug(f"Requested NVIDIA GPU resources: {gpu_count}")
-            elif manufacturer == "amd":
-                container.resources.requests["amd.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["amd.com/gpu"] = gpu_count
-                self.logger.debug(f"Requested AMD GPU resources: {gpu_count}")
-            else:
-                # fallback if we never see a recognized manufacturer
-                # (the code above raises an error first, so we might never get here)
-                container.resources.requests["nvidia.com/gpu"] = gpu_count
-                if not scale_value:
-                    container.resources.limits["nvidia.com/gpu"] = gpu_count
+            identifier = {
+                "nvidia": "nvidia.com/gpu",
+                "amd": "amd.com/gpu",
+            }.get(manufacturer, "nvidia.com/gpu")
+            container.resources.requests[identifier] = gpu_count
+            if not scale_value:
+                container.resources.limits[identifier] = gpu_count
+
         # Privileged mode
         if self.privileged or (
             DeploymentMethod.APPTAINER
