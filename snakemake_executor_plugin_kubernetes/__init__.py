@@ -378,6 +378,13 @@ class Executor(RemoteExecutor):
             if identifier == "nvidia.com/gpu":
                 if self.nvidia_runtime_class_name is not None:
                     pod_spec.runtime_class_name = self.nvidia_runtime_class_name
+                if (
+                    DeploymentMethod.APPTAINER
+                    in self.workflow.deployment_settings.deployment_method
+                ):
+                    envvar = kubernetes.client.V1EnvVar(name="APPTAINER_NV")
+                    envvar.value = "true"
+                    container.env.append(envvar)
 
         # Privileged mode
         if self.privileged or (
