@@ -351,8 +351,7 @@ class Executor(RemoteExecutor):
         if "mem_mb" in resources_dict:
             mem_mb = resources_dict["mem_mb"]
             container.resources.requests["memory"] = "{}M".format(mem_mb)
-            if not scale_value:
-                container.resources.limits["memory"] = "{}M".format(mem_mb)
+            container.resources.limits["memory"] = "{}M".format(mem_mb)
         # Disk
         if "disk_mb" in resources_dict:
             disk_mb = int(resources_dict.get("disk_mb", 1024))
