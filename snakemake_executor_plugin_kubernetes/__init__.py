@@ -4,7 +4,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import time
-from typing import Any, AsyncGenerator, List, Optional, Self
+from typing import Any, AsyncGenerator, Dict, List, Optional, Self
 import uuid
 
 import kubernetes
@@ -68,6 +68,22 @@ def parse_bool(arg: str) -> bool:
 
 def unparse_bool(arg: bool) -> str:
     return bool(arg).lower()
+
+
+def parse_annotations(args: List[str]) -> Dict[str, str]:
+    annotations = {}
+    for arg in args:
+        if "=" not in arg:
+            raise WorkflowError(
+                f"Invalid annotation spec ({arg}), has to be <key>=<value>."
+            )
+        key, value = arg.split("=", 1)
+        annotations[key] = value
+    return annotations
+
+
+def unparse_annotations(annotations: Dict[str, str]) -> List[str]:
+    return [f"{key}={value}" for key, value in annotations.items()]
 
 
 @dataclass
@@ -138,6 +154,24 @@ class ExecutorSettings(ExecutorSettingsBase):
             "unparse_func": unparse_bool,
         },
     )
+    scheduler_name: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Set the scheduler name for the pod spec. "
+            "This allows using custom schedulers (e.g., volcano, kube-batch). "
+            "If specified, schedulerName will be added to the pod spec."
+        },
+    )
+    annotations: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={
+            "help": "Add custom annotations to the pod template metadata. "
+            "Format: <key>=<value>. Can be specified multiple times.",
+            "parse_func": parse_annotations,
+            "unparse_func": unparse_annotations,
+            "nargs": "+",
+        },
+    )
 
 
 # Required:
@@ -191,6 +225,8 @@ class Executor(RemoteExecutor):
             self.workflow.executor_settings.nvidia_runtime_class_name
         )
         self.gpu_overcommit = self.workflow.executor_settings.gpu_overcommit
+        self.scheduler_name = self.workflow.executor_settings.scheduler_name
+        self.annotations = self.workflow.executor_settings.annotations
 
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
 
@@ -246,9 +282,18 @@ class Executor(RemoteExecutor):
         pod_spec = kubernetes.client.V1PodSpec(
             containers=[container], node_selector=node_selector, restart_policy="Never"
         )
+
+        template_metadata = None
+        if self.annotations:
+            template_metadata = kubernetes.client.V1ObjectMeta(annotations=self.annotations)
+            self.logger.debug(f"Set template annotations: {self.annotations}")
+
         body.spec = kubernetes.client.V1JobSpec(
             backoff_limit=0,
-            template=kubernetes.client.V1PodTemplateSpec(spec=pod_spec),
+            template=kubernetes.client.V1PodTemplateSpec(
+                metadata=template_metadata,
+                spec=pod_spec,
+            ),
         )
 
         # Add toleration for GPU nodes if GPU is requested
@@ -305,6 +350,11 @@ class Executor(RemoteExecutor):
             self.logger.debug(
                 f"Set service account name: {self.k8s_service_account_name}"
             )
+
+        # Add scheduler name if provided
+        if self.scheduler_name:
+            pod_spec.scheduler_name = self.scheduler_name
+            self.logger.debug(f"Set scheduler name: {self.scheduler_name}")
 
         # Workdir volume
         workdir_volume = kubernetes.client.V1Volume(name="workdir")
