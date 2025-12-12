@@ -165,6 +165,16 @@ class ExecutorSettings(ExecutorSettingsBase):
     annotations: Dict[str, str] = field(
         default_factory=dict,
         metadata={
+            "help": "Add custom annotations to the job metadata. "
+            "Format: <key>=<value>. Can be specified multiple times.",
+            "parse_func": parse_annotations,
+            "unparse_func": unparse_annotations,
+            "nargs": "+",
+        },
+    )
+    pod_annotations: Dict[str, str] = field(
+        default_factory=dict,
+        metadata={
             "help": "Add custom annotations to the pod template metadata. "
             "Format: <key>=<value>. Can be specified multiple times.",
             "parse_func": parse_annotations,
@@ -227,6 +237,7 @@ class Executor(RemoteExecutor):
         self.gpu_overcommit = self.workflow.executor_settings.gpu_overcommit
         self.scheduler_name = self.workflow.executor_settings.scheduler_name
         self.annotations = self.workflow.executor_settings.annotations
+        self.pod_annotations = self.workflow.executor_settings.pod_annotations
 
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
 
@@ -253,6 +264,9 @@ class Executor(RemoteExecutor):
         body = kubernetes.client.V1Job()
         body.metadata = kubernetes.client.V1ObjectMeta(labels={"app": "snakemake"})
         body.metadata.name = jobid
+        if self.annotations:
+            body.metadata.annotations = self.annotations
+            self.logger.debug(f"Set job annotations: {self.annotations}")
 
         # Container setup
         container = kubernetes.client.V1Container(name="snakemake")
@@ -283,17 +297,18 @@ class Executor(RemoteExecutor):
             containers=[container], node_selector=node_selector, restart_policy="Never"
         )
 
-        template_metadata = None
-        if self.annotations:
-            template_metadata = kubernetes.client.V1ObjectMeta(annotations=self.annotations)
-            self.logger.debug(f"Set template annotations: {self.annotations}")
+        pod_template = kubernetes.client.V1PodTemplateSpec(
+            spec=pod_spec,
+            metadata=kubernetes.client.V1ObjectMeta(),
+        )
+
+        if self.pod_annotations:
+            pod_template.metadata.annotations = self.pod_annotations
+            self.logger.debug(f"Set pod template annotations: {self.pod_annotations}")
 
         body.spec = kubernetes.client.V1JobSpec(
             backoff_limit=0,
-            template=kubernetes.client.V1PodTemplateSpec(
-                metadata=template_metadata,
-                spec=pod_spec,
-            ),
+            template=pod_template,
         )
 
         # Add toleration for GPU nodes if GPU is requested
@@ -664,9 +679,7 @@ class Executor(RemoteExecutor):
         body = kubernetes.client.V1DeleteOptions(propagation_policy="Foreground")
         self.logger.debug(f"Deleting job {jobid} in namespace {self.namespace}")
         try:
-            self.batchapi.delete_namespaced_job(
-                jobid, self.namespace, body=body
-            )
+            self.batchapi.delete_namespaced_job(jobid, self.namespace, body=body)
         except kubernetes.client.rest.ApiException as e:
             if e.status == 404 and ignore_not_found:
                 self.logger.debug(
